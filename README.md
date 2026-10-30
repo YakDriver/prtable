@@ -73,3 +73,7 @@ detect {
 ## Privacy
 
 Wikis on public repos are public. By default `prtable` skips PRs in private repos (`search.include_private = false`) so their titles aren't published.
+
+## Development
+
+`make ci` runs the same checks as CI: build, gofmt, `go fix`, `go mod tidy`, vet, and tests. `make help` lists every target, including `make fmt`, `make fix`, and `make tidy` to apply fixes.
