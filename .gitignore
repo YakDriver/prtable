@@ -1,0 +1,6 @@
+# Built binary
+/prtable
+
+# A personal config in the working directory (one of the lookup locations).
+# Keep yours in ~/.config/prtable/config.hcl or out of the repo.
+/prtable.hcl
