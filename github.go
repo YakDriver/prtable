@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 )
 
@@ -20,6 +21,51 @@ fragment pr on PullRequest {
 }`
 
 type actor struct{ Login string }
+
+// issueFragment is what the issues table needs. closedByPullRequestsReferences
+// is the set of open PRs that will close the issue on merge. Only the first
+// page is fetched; totalCount says how many were left out.
+const issueFragment = `
+fragment issue on Issue {
+  number title url
+  repository { nameWithOwner isPrivate }
+  assignees(first: 20) { nodes { login } }
+  closedByPullRequestsReferences(first: 10, includeClosedPrs: false) {
+    totalCount
+    nodes { number url repository { nameWithOwner isPrivate } }
+  }
+}`
+
+// prRef is a closing PR as issueFragment fetches it.
+type prRef struct {
+	Number     int
+	URL        string
+	Repository struct {
+		NameWithOwner string
+		IsPrivate     bool
+	}
+}
+
+// issue mirrors issueFragment.
+type issue struct {
+	Number     int
+	Title      string
+	URL        string
+	Repository struct {
+		NameWithOwner string
+		IsPrivate     bool
+	}
+	Assignees struct{ Nodes []actor }
+
+	ClosedByPullRequestsReferences struct {
+		TotalCount int
+		Nodes      []prRef
+	}
+}
+
+func (i *issue) assignedTo(login string) bool {
+	return slices.ContainsFunc(i.Assignees.Nodes, func(a actor) bool { return strings.EqualFold(a.Login, login) })
+}
 
 // pullRequest mirrors prFragment. encoding/json matches field names
 // case-insensitively, so no struct tags are needed.
@@ -118,14 +164,51 @@ func (g *github) login() (string, error) {
 
 // search returns every PR matching q, following pagination.
 func (g *github) search(q string) ([]*pullRequest, error) {
+	all, _, err := searchAll(g, q, "pr", prFragment, func(p *pullRequest) string { return p.URL })
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range all {
+		g.cache[p.URL] = p
+	}
+	return all, nil
+}
+
+// searchIssues returns every issue matching q, following pagination. Rows
+// missing from the result are dropped from the table, so an incomplete
+// result (GitHub search stops at 1,000) is an error rather than a partial
+// list.
+func (g *github) searchIssues(q string) ([]*issue, error) {
+	all, total, err := searchAll(g, q, "issue", issueFragment, func(i *issue) string { return i.URL })
+	if err != nil {
+		return nil, err
+	}
+	if err := checkComplete(q, len(all), total); err != nil {
+		return nil, err
+	}
+	return all, nil
+}
+
+func checkComplete(q string, got, total int) error {
+	if got < total {
+		return fmt.Errorf("search %q returned %d of %d issues (GitHub search stops at 1,000); narrow issues.all_repos or issues.assigned_repos", q, got, total)
+	}
+	return nil
+}
+
+// searchAll runs a search whose nodes are spread from fragment, following
+// pagination, and returns the nodes with GitHub's count of matches. Nodes of
+// another type decode empty, so those without a URL are dropped.
+func searchAll[T any](g *github, q, fragment, fragmentSrc string, url func(*T) string) ([]*T, int, error) {
 	query := `query($q: String!, $after: String) {
   search(query: $q, type: ISSUE, first: 50, after: $after) {
+    issueCount
     pageInfo { hasNextPage endCursor }
-    nodes { ...pr }
+    nodes { ...` + fragment + ` }
   }
-}` + prFragment
+}` + fragmentSrc
 
-	var all []*pullRequest
+	var all []*T
 	after := ""
 	for {
 		vars := map[string]string{"q": q}
@@ -134,24 +217,24 @@ func (g *github) search(q string) ([]*pullRequest, error) {
 		}
 		var data struct {
 			Search struct {
-				PageInfo struct {
+				IssueCount int
+				PageInfo   struct {
 					HasNextPage bool
 					EndCursor   string
 				}
-				Nodes []*pullRequest
+				Nodes []*T
 			}
 		}
 		if err := g.graphql(query, vars, &data); err != nil {
-			return nil, fmt.Errorf("search %q: %w", q, err)
+			return nil, 0, fmt.Errorf("search %q: %w", q, err)
 		}
-		for _, p := range data.Search.Nodes {
-			if p != nil && p.URL != "" {
-				g.cache[p.URL] = p
-				all = append(all, p)
+		for _, n := range data.Search.Nodes {
+			if n != nil && url(n) != "" {
+				all = append(all, n)
 			}
 		}
 		if !data.Search.PageInfo.HasNextPage {
-			return all, nil
+			return all, data.Search.IssueCount, nil
 		}
 		after = data.Search.PageInfo.EndCursor
 	}

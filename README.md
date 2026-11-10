@@ -1,9 +1,10 @@
 # prtable
 
-`prtable` keeps two tables on a GitHub wiki up to date:
+`prtable` keeps these tables on a GitHub wiki up to date:
 
 - **In process**, on one page: open PRs you wrote or are assigned to, with draft status, linked issues, test output, Copilot and human review, and unresolved review threads.
 - **Merged**, at the top of another page: PRs that merged, newest first.
+- **Issues** (optional), on the in-process page: open issues assigned to you in some repos, and every open issue in others.
 
 You run it by hand. Each run reads the current state from GitHub, refreshes the generated columns, moves merged PRs to the merged table, adds new PRs, and pushes the wiki. If nothing changed, it pushes nothing.
 
@@ -47,6 +48,25 @@ Unknown or misspelled settings are errors, so a typo can't be silently ignored.
 | Row order | Yours. New rows go after the PR they depend on, or at the end. |
 
 `prtable` only rewrites text between its `<!-- prtable:... -->` markers, which are invisible on the rendered page. The rest of both pages is untouched. On the first run it adds the markers: under `wiki.open_heading` if the open page has that heading (adopting a hand-built table there), otherwise at the top of the page.
+
+## Issues
+
+The issues table is off until you list repos in the `issues` block:
+
+```hcl
+issues {
+  assigned_repos = ["hashicorp/*"]             # only issues assigned to you
+  all_repos      = ["YakDriver/gh-averyindex"] # every open issue
+}
+```
+
+`assigned_repos` takes globs. `all_repos` takes exact `owner/name`, since each one becomes a `repo:` search. A repo in both lists gets every issue.
+
+The table has three columns. The memory jogger before the issue link is yours, like on PRs. Assignees and PRs (open PRs that close the issue on merge) are regenerated. An issue that closes, or stops matching the config (for example, you're unassigned), leaves the table. It doesn't move to the merged page. `search.include_private` and `search.extra_query` apply to issue searches too, and closing PRs in private repos are left out of the PRs column unless `include_private` is on.
+
+If an issue search matches more than GitHub search returns (1,000 results), `prtable` stops with an error instead of dropping the rows it didn't see. If you empty both lists, the next run removes the generated table and leaves the heading for you to delete.
+
+On the first run with issues configured, the table goes under `issues.heading` (default `## Issues`) if the open page has that heading, otherwise right after the PR table.
 
 ## Example: a Terraform provider maintainer
 

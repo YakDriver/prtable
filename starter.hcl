@@ -108,3 +108,19 @@ detect {
   # group holding the PR number.
   depends_on = ["(?i)\\b(?:stack(?:ed|s)?\\s+on|based\\s+on|depends\\s+on)\\s+#(\\d+)\\b"]
 }
+
+issues {
+  # An optional table of open issues on open_page. With both repo lists
+  # empty there is no issues table. Issues leave the table when they close
+  # or stop matching; they aren't moved to merged_page.
+
+  # On the first run, the table goes under this heading if open_page has
+  # it, otherwise right after the PR table with this heading.
+  heading = "## Issues"
+
+  # owner/name globs, e.g. "hashicorp/*": list issues assigned to you.
+  assigned_repos = []
+
+  # Exact owner/name: list every open issue, assigned to you or not.
+  all_repos = []
+}

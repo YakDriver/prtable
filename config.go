@@ -24,6 +24,7 @@ type Config struct {
 	Search  *SearchConfig  `hcl:"search,block"`
 	Display *DisplayConfig `hcl:"display,block"`
 	Detect  *DetectConfig  `hcl:"detect,block"`
+	Issues  *IssuesConfig  `hcl:"issues,block"`
 }
 
 type WikiConfig struct {
@@ -62,6 +63,18 @@ type DetectConfig struct {
 	UnitOutput       []string  `hcl:"unit_output,optional"`
 	TestClaim        []string  `hcl:"test_claim,optional"`
 	DependsOn        []string  `hcl:"depends_on,optional"`
+}
+
+// IssuesConfig controls the optional issues table on the open page. With
+// both repo lists empty there is no issues table.
+type IssuesConfig struct {
+	Heading       string   `hcl:"heading,optional"`
+	AssignedRepos []string `hcl:"assigned_repos,optional"`
+	AllRepos      []string `hcl:"all_repos,optional"`
+}
+
+func (c *IssuesConfig) enabled() bool {
+	return len(c.AssignedRepos) > 0 || len(c.AllRepos) > 0
 }
 
 type Verdict struct {
@@ -103,6 +116,11 @@ func defaultConfig() *Config {
 			UnitOutput:       []string{`(?m)--- PASS: Test`, `(?m)^ok\s+\S`},
 			TestClaim:        []string{`(?i)\btests?\s+pass`},
 			DependsOn:        []string{`(?i)\b(?:stack(?:ed|s)?\s+on|based\s+on|depends\s+on)\s+#(\d+)\b`},
+		},
+		Issues: &IssuesConfig{
+			Heading:       "## Issues",
+			AssignedRepos: []string{},
+			AllRepos:      []string{},
 		},
 	}
 }
@@ -270,6 +288,27 @@ func (c *Config) compile() (*rules, error) {
 	r.claim = compileAll("test_claim", c.Detect.TestClaim, 0)
 	r.dependsOn = compileAll("depends_on", c.Detect.DependsOn, 1)
 
+	is := c.Issues
+	for _, g := range is.AssignedRepos {
+		if _, err := path.Match(g, "owner/repo"); err != nil {
+			fail("issues.assigned_repos: bad repo glob %q: %v", g, err)
+		}
+	}
+	// all_repos becomes repo: search qualifiers, and search has no globs.
+	for _, repo := range is.AllRepos {
+		owner, name, ok := strings.Cut(repo, "/")
+		if !ok || owner == "" || name == "" || strings.ContainsAny(repo, "*?[]\\ ") || strings.Contains(name, "/") {
+			fail("issues.all_repos: %q must be an exact owner/name, not a glob", repo)
+		}
+	}
+	if is.enabled() {
+		if !strings.HasPrefix(is.Heading, "#") {
+			fail("issues.heading must be a markdown heading, got %q", is.Heading)
+		} else if is.Heading == w.OpenHeading {
+			fail("issues.heading and wiki.open_heading must differ")
+		}
+	}
+
 	if err := errors.Join(errs...); err != nil {
 		return nil, err
 	}
@@ -295,6 +334,17 @@ func (r *rules) wantRepo(repo string, private bool) bool {
 		return matchAny(s.IncludeRepos, repo)
 	}
 	return true
+}
+
+// wantIssue reports whether an open issue belongs in the issues table: any
+// issue in an all_repos repo, or one assigned to you in an assigned_repos
+// repo. Private repos are filtered separately.
+func (r *rules) wantIssue(repo string, assignedToMe bool) bool {
+	is := r.cfg.Issues
+	if slices.ContainsFunc(is.AllRepos, func(x string) bool { return strings.EqualFold(x, repo) }) {
+		return true
+	}
+	return assignedToMe && matchAny(is.AssignedRepos, repo)
 }
 
 func (r *rules) mergedPageName() string {

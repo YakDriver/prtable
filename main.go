@@ -3,7 +3,8 @@
 // It finds open PRs tied to you (author, assignee, ... per config), refreshes
 // an "in process" table on one wiki page, and moves merged PRs to the top of
 // a table on another. Hand-edited cells (memory jogger, Desc, Depends On) and
-// row order are preserved. Everything about your setup lives in an HCL config
+// row order are preserved. Optionally, it also keeps an issues table on the
+// open page. Everything about your setup lives in an HCL config
 // file; run prtable -init to write a commented starter.
 //
 // Usage:
@@ -105,6 +106,14 @@ func run(r *rules, dir string, dryRun bool) error {
 
 	open := ensureOpenBlock(openRaw, w.OpenHeading)
 	done := ensureDoneBlock(doneRaw, w.MergedHeading, w.OtherHeading)
+	withIssues := r.cfg.Issues.enabled()
+	if withIssues {
+		open = ensureIssuesBlock(open, r.cfg.Issues.Heading)
+	} else if o, removed := removeBlock(open, issuesStart, issuesEnd); removed {
+		// Issues were turned off: don't leave a table that never updates.
+		open = o
+		fmt.Println("• removed the issues table (no issues repos configured); delete its heading by hand if you like")
+	}
 
 	openBlock, err := extractBlock(open, openStart, openEnd)
 	if err != nil {
@@ -123,6 +132,16 @@ func run(r *rules, dir string, dryRun bool) error {
 		return fmt.Errorf("%s: %w", w.MergedPage, err)
 	}
 	lastRun := parseUpdated(openBlock)
+	var issueRows []*issueRow
+	if withIssues {
+		issuesBlock, err := extractBlock(open, issuesStart, issuesEnd)
+		if err != nil {
+			return fmt.Errorf("%s: %w", w.OpenPage, err)
+		}
+		if issueRows, err = parseIssueRows(issuesBlock); err != nil {
+			return fmt.Errorf("%s: %w", w.OpenPage, err)
+		}
+	}
 
 	gh := newGitHub()
 	me, err := gh.login()
@@ -134,6 +153,11 @@ func run(r *rules, dir string, dryRun bool) error {
 	if err != nil {
 		return err
 	}
+	if withIssues {
+		if issueRows, err = s.syncIssues(issueRows); err != nil {
+			return err
+		}
+	}
 	for _, n := range s.notes {
 		fmt.Println("•", n)
 	}
@@ -144,7 +168,8 @@ func run(r *rules, dir string, dryRun bool) error {
 	if stamp.IsZero() {
 		stamp = time.Now()
 	}
-	newOpen, newDone, err := render(r, open, done, openRows, doneRows, stamp)
+	t := tables{open: openRows, done: doneRows, issues: issueRows, withIssues: withIssues}
+	newOpen, newDone, err := render(r, open, done, t, stamp)
 	if err != nil {
 		return err
 	}
@@ -152,7 +177,7 @@ func run(r *rules, dir string, dryRun bool) error {
 		fmt.Println("wiki already up to date")
 		return nil
 	}
-	if newOpen, newDone, err = render(r, open, done, openRows, doneRows, time.Now()); err != nil {
+	if newOpen, newDone, err = render(r, open, done, t, time.Now()); err != nil {
 		return err
 	}
 
@@ -186,16 +211,32 @@ func run(r *rules, dir string, dryRun bool) error {
 	if _, err := git(dir, "push", "-q", "origin", "HEAD"); err != nil {
 		return err
 	}
-	fmt.Printf("pushed: %d in process, %d merged\n", len(openRows), len(doneRows))
+	fmt.Printf("pushed: %d in process, %d merged", len(openRows), len(doneRows))
+	if withIssues {
+		fmt.Printf(", %d issues", len(issueRows))
+	}
+	fmt.Println()
 	return nil
 }
 
-func render(r *rules, open, done string, openRows, doneRows []*row, stamp time.Time) (string, string, error) {
-	o, err := replaceBlock(open, openStart, openEnd, r.renderOpen(openRows, stamp))
+// tables is the synced content of every generated block.
+type tables struct {
+	open, done []*row
+	issues     []*issueRow
+	withIssues bool
+}
+
+func render(r *rules, open, done string, t tables, stamp time.Time) (string, string, error) {
+	o, err := replaceBlock(open, openStart, openEnd, r.renderOpen(t.open, stamp))
 	if err != nil {
 		return "", "", err
 	}
-	d, err := replaceBlock(done, doneStart, doneEnd, r.renderDone(doneRows))
+	if t.withIssues {
+		if o, err = replaceBlock(o, issuesStart, issuesEnd, r.renderIssues(t.issues)); err != nil {
+			return "", "", err
+		}
+	}
+	d, err := replaceBlock(done, doneStart, doneEnd, r.renderDone(t.done))
 	if err != nil {
 		return "", "", err
 	}
