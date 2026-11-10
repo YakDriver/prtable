@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -108,8 +109,18 @@ func fixUpCell(p *pullRequest) string {
 // jogFor is the starting memory jogger for a new row: a shortened title plus
 // tags for other repos and other authors. You're expected to edit it.
 func (r *rules) jogFor(p *pullRequest, me string) string {
+	var tags []string
+	if d := r.cfg.Display; d.OtherAuthorTag != "" && !strings.EqualFold(p.Author.Login, me) {
+		tags = append(tags, d.OtherAuthorTag)
+	}
+	return r.jog(p.Title, p.Repository.NameWithOwner, tags...)
+}
+
+// jog shortens title per the display settings and adds a repo tag (unless
+// repo is the default) followed by any extra tags.
+func (r *rules) jog(title, repo string, extra ...string) string {
 	d := r.cfg.Display
-	t := strings.TrimSpace(strings.ReplaceAll(p.Title, "`", ""))
+	t := strings.TrimSpace(strings.ReplaceAll(title, "`", ""))
 	if r.jogStrip != nil {
 		t = strings.TrimSpace(r.jogStrip.ReplaceAllString(t, ""))
 	}
@@ -117,12 +128,10 @@ func (r *rules) jogFor(p *pullRequest, me string) string {
 		t = strings.Join(w[:d.JogMaxWords], " ") + "…"
 	}
 	var tags []string
-	if repo := p.Repository.NameWithOwner; !strings.EqualFold(repo, d.DefaultRepo) {
+	if !strings.EqualFold(repo, d.DefaultRepo) {
 		tags = append(tags, repo[strings.Index(repo, "/")+1:])
 	}
-	if d.OtherAuthorTag != "" && !strings.EqualFold(p.Author.Login, me) {
-		tags = append(tags, d.OtherAuthorTag)
-	}
+	tags = append(tags, extra...)
 	if len(tags) > 0 {
 		t += " (" + strings.Join(tags, ", ") + ")"
 	}
@@ -167,6 +176,9 @@ type syncer struct {
 	r     *rules
 	me    string
 	notes []string
+
+	// issueSearch replaces gh.searchIssues in tests.
+	issueSearch func(q string) ([]*issue, error)
 }
 
 func (s *syncer) note(format string, args ...any) {
@@ -338,4 +350,114 @@ func (s *syncer) strikeMerged(cell string) string {
 		}
 		return match
 	})
+}
+
+func assigneesCell(i *issue) string {
+	var names []string
+	for _, a := range i.Assignees.Nodes {
+		names = append(names, a.Login)
+	}
+	if len(names) == 0 {
+		return "—"
+	}
+	return strings.Join(names, ", ")
+}
+
+// issuePRsCell links the open PRs that will close the issue when merged.
+func issuePRsCell(i *issue) string {
+	var links []string
+	for _, p := range i.ClosedByPullRequestsReferences.Nodes {
+		text := fmt.Sprintf("#%d", p.Number)
+		if !strings.EqualFold(p.Repository.NameWithOwner, i.Repository.NameWithOwner) {
+			text = p.Repository.NameWithOwner + text
+		}
+		links = append(links, fmt.Sprintf("[%s](%s)", text, p.URL))
+	}
+	if len(links) == 0 {
+		return "—"
+	}
+	return strings.Join(links, ", ")
+}
+
+// openIssues returns the open issues the issues config asks for: those
+// assigned to me in assigned_repos, and every one in all_repos.
+func (s *syncer) openIssues() ([]*issue, error) {
+	is, extra := s.r.cfg.Issues, s.r.cfg.Search.ExtraQuery
+	var queries []string
+	if len(is.AssignedRepos) > 0 {
+		queries = append(queries, fmt.Sprintf("is:issue is:open %s assignee:%s sort:created-asc", extra, s.me))
+	}
+	for _, repo := range is.AllRepos {
+		queries = append(queries, fmt.Sprintf("is:issue is:open %s repo:%s sort:created-asc", extra, repo))
+	}
+
+	var out []*issue
+	seen := map[string]bool{}
+	private := map[string]int{}
+	search := s.issueSearch
+	if search == nil {
+		search = s.gh.searchIssues
+	}
+	for _, q := range queries {
+		found, err := search(strings.Join(strings.Fields(q), " "))
+		if err != nil {
+			return nil, err
+		}
+		for _, i := range found {
+			if seen[i.URL] {
+				continue
+			}
+			seen[i.URL] = true
+			repo := i.Repository.NameWithOwner
+			switch {
+			case !s.r.wantIssue(repo, i.assignedTo(s.me)):
+			case i.Repository.IsPrivate && !s.r.cfg.Search.IncludePrivate:
+				private[repo]++
+			default:
+				out = append(out, i)
+			}
+		}
+	}
+	for _, repo := range slices.Sorted(maps.Keys(private)) {
+		s.note("skipped %d issue(s) in private %s (search.include_private is off)", private[repo], repo)
+	}
+	return out, nil
+}
+
+// syncIssues makes the issues table match GitHub. Rows keep their position
+// and memory jogger; rows for issues that closed or no longer match the
+// config are dropped; new issues go at the end.
+func (s *syncer) syncIssues(rows []*issueRow) ([]*issueRow, error) {
+	found, err := s.openIssues()
+	if err != nil {
+		return nil, err
+	}
+	byURL := map[string]*issue{}
+	for _, i := range found {
+		byURL[i.URL] = i
+	}
+
+	var out []*issueRow
+	listed := map[string]bool{}
+	for _, x := range rows {
+		i, ok := byURL[x.URL]
+		if !ok {
+			s.note("dropped %s: closed, or no longer matches the issues config", x.URL)
+			continue
+		}
+		listed[x.URL] = true
+		x.Assignees, x.PRs = assigneesCell(i), issuePRsCell(i)
+		out = append(out, x)
+	}
+	for _, i := range found {
+		if listed[i.URL] {
+			continue
+		}
+		out = append(out, &issueRow{
+			URL: i.URL, Jog: s.r.jog(i.Title, i.Repository.NameWithOwner),
+			Assignees: assigneesCell(i), PRs: issuePRsCell(i),
+		})
+		s.note("added %s", i.URL)
+	}
+	return out, nil
 }

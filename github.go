@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 )
 
@@ -20,6 +21,42 @@ fragment pr on PullRequest {
 }`
 
 type actor struct{ Login string }
+
+// issueFragment is what the issues table needs. closedByPullRequestsReferences
+// is the set of open PRs that will close the issue on merge.
+const issueFragment = `
+fragment issue on Issue {
+  number title url
+  repository { nameWithOwner isPrivate }
+  assignees(first: 20) { nodes { login } }
+  closedByPullRequestsReferences(first: 10, includeClosedPrs: false) {
+    nodes { number url repository { nameWithOwner } }
+  }
+}`
+
+// issue mirrors issueFragment.
+type issue struct {
+	Number     int
+	Title      string
+	URL        string
+	Repository struct {
+		NameWithOwner string
+		IsPrivate     bool
+	}
+	Assignees struct{ Nodes []actor }
+
+	ClosedByPullRequestsReferences struct {
+		Nodes []struct {
+			Number     int
+			URL        string
+			Repository struct{ NameWithOwner string }
+		}
+	}
+}
+
+func (i *issue) assignedTo(login string) bool {
+	return slices.ContainsFunc(i.Assignees.Nodes, func(a actor) bool { return strings.EqualFold(a.Login, login) })
+}
 
 // pullRequest mirrors prFragment. encoding/json matches field names
 // case-insensitively, so no struct tags are needed.
@@ -118,14 +155,33 @@ func (g *github) login() (string, error) {
 
 // search returns every PR matching q, following pagination.
 func (g *github) search(q string) ([]*pullRequest, error) {
+	all, err := searchAll(g, q, "pr", prFragment, func(p *pullRequest) string { return p.URL })
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range all {
+		g.cache[p.URL] = p
+	}
+	return all, nil
+}
+
+// searchIssues returns every issue matching q, following pagination.
+func (g *github) searchIssues(q string) ([]*issue, error) {
+	return searchAll(g, q, "issue", issueFragment, func(i *issue) string { return i.URL })
+}
+
+// searchAll runs a search whose nodes are spread from fragment, following
+// pagination. Nodes of another type decode empty, so those without a URL are
+// dropped.
+func searchAll[T any](g *github, q, fragment, fragmentSrc string, url func(*T) string) ([]*T, error) {
 	query := `query($q: String!, $after: String) {
   search(query: $q, type: ISSUE, first: 50, after: $after) {
     pageInfo { hasNextPage endCursor }
-    nodes { ...pr }
+    nodes { ...` + fragment + ` }
   }
-}` + prFragment
+}` + fragmentSrc
 
-	var all []*pullRequest
+	var all []*T
 	after := ""
 	for {
 		vars := map[string]string{"q": q}
@@ -138,16 +194,15 @@ func (g *github) search(q string) ([]*pullRequest, error) {
 					HasNextPage bool
 					EndCursor   string
 				}
-				Nodes []*pullRequest
+				Nodes []*T
 			}
 		}
 		if err := g.graphql(query, vars, &data); err != nil {
 			return nil, fmt.Errorf("search %q: %w", q, err)
 		}
-		for _, p := range data.Search.Nodes {
-			if p != nil && p.URL != "" {
-				g.cache[p.URL] = p
-				all = append(all, p)
+		for _, n := range data.Search.Nodes {
+			if n != nil && url(n) != "" {
+				all = append(all, n)
 			}
 		}
 		if !data.Search.PageInfo.HasNextPage {
