@@ -268,6 +268,26 @@ func ensureIssuesBlock(doc, heading string) string {
 	return doc[:i] + "\n\n" + heading + "\n\n" + empty + doc[i:]
 }
 
+// removeBlock deletes the markers from start through end and what's
+// between them, leaving one blank line where they were. It reports whether
+// the markers were there.
+func removeBlock(doc, start, end string) (string, bool) {
+	i := strings.Index(doc, start)
+	j := strings.Index(doc, end)
+	if i < 0 || j < i {
+		return doc, false
+	}
+	before := strings.TrimRight(doc[:i], "\n")
+	after := strings.TrimLeft(doc[j+len(end):], "\n")
+	switch {
+	case before == "":
+		return after, true
+	case after == "":
+		return before + "\n", true
+	}
+	return before + "\n\n" + after, true
+}
+
 func extractBlock(doc, start, end string) (string, error) {
 	i := strings.Index(doc, start)
 	j := strings.Index(doc, end)

@@ -364,14 +364,23 @@ func assigneesCell(i *issue) string {
 }
 
 // issuePRsCell links the open PRs that will close the issue when merged.
-func issuePRsCell(i *issue) string {
+// PRs in private repos are left out unless includePrivate, so their names
+// aren't published. "+N more" counts PRs past the fetched page.
+func issuePRsCell(i *issue, includePrivate bool) string {
+	refs := i.ClosedByPullRequestsReferences
 	var links []string
-	for _, p := range i.ClosedByPullRequestsReferences.Nodes {
+	for _, p := range refs.Nodes {
+		if p.Repository.IsPrivate && !includePrivate {
+			continue
+		}
 		text := fmt.Sprintf("#%d", p.Number)
 		if !strings.EqualFold(p.Repository.NameWithOwner, i.Repository.NameWithOwner) {
 			text = p.Repository.NameWithOwner + text
 		}
 		links = append(links, fmt.Sprintf("[%s](%s)", text, p.URL))
+	}
+	if more := refs.TotalCount - len(refs.Nodes); more > 0 {
+		links = append(links, fmt.Sprintf("+%d more", more))
 	}
 	if len(links) == 0 {
 		return "—"
@@ -446,7 +455,7 @@ func (s *syncer) syncIssues(rows []*issueRow) ([]*issueRow, error) {
 			continue
 		}
 		listed[x.URL] = true
-		x.Assignees, x.PRs = assigneesCell(i), issuePRsCell(i)
+		x.Assignees, x.PRs = assigneesCell(i), issuePRsCell(i, s.r.cfg.Search.IncludePrivate)
 		out = append(out, x)
 	}
 	for _, i := range found {
@@ -455,7 +464,7 @@ func (s *syncer) syncIssues(rows []*issueRow) ([]*issueRow, error) {
 		}
 		out = append(out, &issueRow{
 			URL: i.URL, Jog: s.r.jog(i.Title, i.Repository.NameWithOwner),
-			Assignees: assigneesCell(i), PRs: issuePRsCell(i),
+			Assignees: assigneesCell(i), PRs: issuePRsCell(i, s.r.cfg.Search.IncludePrivate),
 		})
 		s.note("added %s", i.URL)
 	}

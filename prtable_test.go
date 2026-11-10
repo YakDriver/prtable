@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -495,19 +496,58 @@ func TestIssueCells(t *testing.T) {
 	if got := assigneesCell(testIssue("u", "o/r")); got != "—" {
 		t.Errorf("no assignees: got %s", got)
 	}
-	if got := issuePRsCell(i); got != "—" {
+	if got := issuePRsCell(i, false); got != "—" {
 		t.Errorf("no PRs: got %s", got)
 	}
-	type ref = struct {
-		Number     int
-		URL        string
-		Repository struct{ NameWithOwner string }
+	ref := func(n int, repo string, private bool) prRef {
+		p := prRef{Number: n, URL: fmt.Sprintf("https://github.com/%s/pull/%d", repo, n)}
+		p.Repository.NameWithOwner, p.Repository.IsPrivate = repo, private
+		return p
 	}
-	a, b := ref{Number: 5, URL: "https://github.com/o/r/pull/5"}, ref{Number: 7, URL: "https://github.com/x/y/pull/7"}
-	a.Repository.NameWithOwner, b.Repository.NameWithOwner = "o/r", "x/y"
-	i.ClosedByPullRequestsReferences.Nodes = []ref{a, b}
-	if got := issuePRsCell(i); got != "[#5](https://github.com/o/r/pull/5), [x/y#7](https://github.com/x/y/pull/7)" {
-		t.Errorf("PRs: got %s", got)
+	i.ClosedByPullRequestsReferences.Nodes = []prRef{ref(5, "o/r", false), ref(7, "x/y", false), ref(8, "x/secret", true)}
+	i.ClosedByPullRequestsReferences.TotalCount = 3
+	if got := issuePRsCell(i, false); got != "[#5](https://github.com/o/r/pull/5), [x/y#7](https://github.com/x/y/pull/7)" {
+		t.Errorf("private PR should be hidden: got %s", got)
+	}
+	if got := issuePRsCell(i, true); !strings.HasSuffix(got, ", [x/secret#8](https://github.com/x/secret/pull/8)") {
+		t.Errorf("include_private should show it: got %s", got)
+	}
+	i.ClosedByPullRequestsReferences.TotalCount = 15
+	if got := issuePRsCell(i, false); !strings.HasSuffix(got, "/pull/7), +12 more") {
+		t.Errorf("overflow: got %s", got)
+	}
+	i.ClosedByPullRequestsReferences.Nodes = []prRef{ref(8, "x/secret", true)}
+	i.ClosedByPullRequestsReferences.TotalCount = 1
+	if got := issuePRsCell(i, false); got != "—" {
+		t.Errorf("only private PRs: got %s", got)
+	}
+}
+
+func TestCheckComplete(t *testing.T) {
+	if err := checkComplete("q", 3, 3); err != nil {
+		t.Error(err)
+	}
+	if err := checkComplete("q", 1000, 3456); err == nil || !strings.Contains(err.Error(), "1000 of 3456") {
+		t.Errorf("want incomplete-result error, got %v", err)
+	}
+}
+
+func TestRemoveBlock(t *testing.T) {
+	added := ensureIssuesBlock("## PRs\n\n"+openStart+"\nx\n"+openEnd+"\n\n## Today\n", "## Issues")
+	block := "| Issue | Assignees | PRs |\n|--|--|--|\n| a [#1](https://github.com/o/r/issues/1) | — | — |\n"
+	doc, err := replaceBlock(added, issuesStart, issuesEnd, block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, removed := removeBlock(doc, issuesStart, issuesEnd)
+	if want := "## PRs\n\n" + openStart + "\nx\n" + openEnd + "\n\n## Issues\n\n## Today\n"; !removed || got != want {
+		t.Errorf("got %q (removed %v)\nwant %q", got, removed, want)
+	}
+	if _, removed := removeBlock(got, issuesStart, issuesEnd); removed {
+		t.Error("nothing left to remove")
+	}
+	if got, _ := removeBlock("## Issues\n\n"+issuesStart+"\n"+issuesEnd+"\n", issuesStart, issuesEnd); got != "## Issues\n" {
+		t.Errorf("block at end: got %q", got)
 	}
 }
 

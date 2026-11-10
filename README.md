@@ -62,7 +62,9 @@ issues {
 
 `assigned_repos` takes globs. `all_repos` takes exact `owner/name`, since each one becomes a `repo:` search. A repo in both lists gets every issue.
 
-The table has three columns. The memory jogger before the issue link is yours, like on PRs. Assignees and PRs (open PRs that close the issue on merge) are regenerated. An issue that closes, or stops matching the config (for example, you're unassigned), leaves the table. It doesn't move to the merged page. `search.include_private` and `search.extra_query` apply to issue searches too.
+The table has three columns. The memory jogger before the issue link is yours, like on PRs. Assignees and PRs (open PRs that close the issue on merge) are regenerated. An issue that closes, or stops matching the config (for example, you're unassigned), leaves the table. It doesn't move to the merged page. `search.include_private` and `search.extra_query` apply to issue searches too, and closing PRs in private repos are left out of the PRs column unless `include_private` is on.
+
+If an issue search matches more than GitHub search returns (1,000 results), `prtable` stops with an error instead of dropping the rows it didn't see. If you empty both lists, the next run removes the generated table and leaves the heading for you to delete.
 
 On the first run with issues configured, the table goes under `issues.heading` (default `## Issues`) if the open page has that heading, otherwise right after the PR table.
 

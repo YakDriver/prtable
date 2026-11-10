@@ -109,6 +109,10 @@ func run(r *rules, dir string, dryRun bool) error {
 	withIssues := r.cfg.Issues.enabled()
 	if withIssues {
 		open = ensureIssuesBlock(open, r.cfg.Issues.Heading)
+	} else if o, removed := removeBlock(open, issuesStart, issuesEnd); removed {
+		// Issues were turned off: don't leave a table that never updates.
+		open = o
+		fmt.Println("• removed the issues table (no issues repos configured); delete its heading by hand if you like")
 	}
 
 	openBlock, err := extractBlock(open, openStart, openEnd)
